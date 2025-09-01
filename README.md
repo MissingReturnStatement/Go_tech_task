@@ -111,27 +111,6 @@ docker compose exec db psql -U app -d wallet_service
 SELECT address, balance_cents FROM wallets LIMIT 5;
 SELECT * FROM transactions ORDER BY created_at DESC LIMIT 10;
 ```
-
-## Тесты
-
-Тесты читают `DATABASE_URL`. В коде тестов есть дефолт:
-```
-postgres://app:app@127.0.0.1:5433/wallet_service?sslmode=disable
-```
-
-Варианты:
-```bash
-# если у тебя локальный postgres на 5433
-export DATABASE_URL=postgres://app:app@127.0.0.1:5433/wallet_service?sslmode=disable
-go test ./...
-
-# если хочешь бить в контейнер db
-export DATABASE_URL=postgres://app:app@db:5432/wallet_service?sslmode=disable
-go test ./...
-```
-
-Убедись, что схема БД и таблицы `wallets`, `transactions` созданы.
-
 ## Что происходит при старте
 
 - приложение читает `DATABASE_URL` 
