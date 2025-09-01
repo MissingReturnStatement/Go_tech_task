@@ -31,8 +31,7 @@ db-psql:
 
 # Прогнать тесты
 test:
-	DATABASE_URL=postgres://app:app@127.0.0.1:5433/wallet_service?sslmode=disable \
-		go test -v ./...
+	docker exec -it dev go test -v ./...
 
 # Демонстрация API (просто тестовые штуки, чтобы показать/проверить что работает)
 
