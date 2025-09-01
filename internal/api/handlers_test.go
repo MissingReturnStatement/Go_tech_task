@@ -21,6 +21,7 @@ import (
 	"gotechtask/internal/repo"
 )
 
+// openDB, открывает соединение к базе для тестов, берет dsn из переменной окружения или дефолтный, проверяет подключение ping
 func openDB(t *testing.T) *sql.DB {
 	t.Helper()
 	dsn := os.Getenv("DATABASE_URL")
@@ -37,6 +38,7 @@ func openDB(t *testing.T) *sql.DB {
 	return db
 }
 
+// buildRouter, собирает http роутер с API поверх переданной базы
 func buildRouter(db *sql.DB) http.Handler {
 	r := chi.NewRouter()
 	api := &API{Repo: repo.NewPostgres(db)}
@@ -44,12 +46,14 @@ func buildRouter(db *sql.DB) http.Handler {
 	return r
 }
 
+// randHex, генерирует случайную hex строку для адреса кошелька
 func randHex(n int) string {
 	b := make([]byte, n)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
 }
 
+// createWallet, добавляет кошелек с заданным балансом в центах, возвращает адрес
 func createWallet(t *testing.T, db *sql.DB, cents int64) string {
 	t.Helper()
 	addr := randHex(32)
@@ -59,6 +63,7 @@ func createWallet(t *testing.T, db *sql.DB, cents int64) string {
 	return addr
 }
 
+// getBalance, возвращает баланс кошелька в центах
 func getBalance(t *testing.T, db *sql.DB, addr string) int64 {
 	t.Helper()
 	var c int64
@@ -68,6 +73,7 @@ func getBalance(t *testing.T, db *sql.DB, addr string) int64 {
 	return c
 }
 
+// cleanupWallets, удаляет транзакции и кошельки после теста
 func cleanupWallets(t *testing.T, db *sql.DB, addrs ...string) {
 	t.Helper()
 	for _, a := range addrs {
@@ -76,29 +82,34 @@ func cleanupWallets(t *testing.T, db *sql.DB, addrs ...string) {
 	}
 }
 
+// TestSend_Success, проверяет успешный перевод и корректную смену балансов
 func TestSend_Success(t *testing.T) {
 	db := openDB(t)
 	defer db.Close()
 
+	// подготовка, два кошелька с балансом
 	from := createWallet(t, db, 10000)
 	to := createWallet(t, db, 10000)
 	defer cleanupWallets(t, db, from, to)
 
+	// фиксация исходных балансов
 	beforeFrom := getBalance(t, db, from)
 	beforeTo := getBalance(t, db, to)
 
+	// сборка роутера и вызов эндпоинта
 	r := buildRouter(db)
-
 	body := fmt.Sprintf(`{"from":"%s","to":"%s","amount":3.50}`, from, to)
 	req := httptest.NewRequest(http.MethodPost, "/api/send", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
 
+	// ожидаем 200
 	if rr.Code != http.StatusOK {
 		t.Fatalf("want 200, got %d, body=%s", rr.Code, rr.Body.String())
 	}
 
+	// проверяем новые балансы, 3.50 это 350 центов
 	afterFrom := getBalance(t, db, from)
 	afterTo := getBalance(t, db, to)
 
@@ -110,10 +121,12 @@ func TestSend_Success(t *testing.T) {
 	}
 }
 
+// TestSend_InsufficientFunds, проверяет отказ при недостатке средств и неизменность балансов
 func TestSend_InsufficientFunds(t *testing.T) {
 	db := openDB(t)
 	defer db.Close()
 
+	// отправитель с маленьким балансом, получатель с нормальным
 	from := createWallet(t, db, 100)
 	to := createWallet(t, db, 10000)
 	defer cleanupWallets(t, db, from, to)
@@ -123,16 +136,19 @@ func TestSend_InsufficientFunds(t *testing.T) {
 
 	r := buildRouter(db)
 
+	// пытаемся перевести больше чем есть
 	body := fmt.Sprintf(`{"from":"%s","to":"%s","amount":3.50}`, from, to)
 	req := httptest.NewRequest(http.MethodPost, "/api/send", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
 
+	// ожидаем 409 конфликт
 	if rr.Code != http.StatusConflict {
 		t.Fatalf("want 409, got %d, body=%s", rr.Code, rr.Body.String())
 	}
 
+	// балансы не должны измениться
 	afterFrom := getBalance(t, db, from)
 	afterTo := getBalance(t, db, to)
 
@@ -142,13 +158,16 @@ func TestSend_InsufficientFunds(t *testing.T) {
 	}
 }
 
+// TestSend_WalletNotFound, проверяет реакцию на несуществующий адрес отправителя
 func TestSend_WalletNotFound(t *testing.T) {
 	db := openDB(t)
 	defer db.Close()
 
+	// существующий получатель
 	to := createWallet(t, db, 10000)
 	defer cleanupWallets(t, db, to)
 
+	// отсутствующий отправитель
 	missing := randHex(32)
 
 	r := buildRouter(db)
@@ -159,11 +178,13 @@ func TestSend_WalletNotFound(t *testing.T) {
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
 
+	// ожидаем 404
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("want 404, got %d, body=%s", rr.Code, rr.Body.String())
 	}
 }
 
+// TestSend_SameAddress, проверяет запрет перевода самому себе
 func TestSend_SameAddress(t *testing.T) {
 	db := openDB(t)
 	defer db.Close()
@@ -179,15 +200,18 @@ func TestSend_SameAddress(t *testing.T) {
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
 
+	// ожидаем 400 неверный запрос
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("want 400, got %d, body=%s", rr.Code, rr.Body.String())
 	}
 }
 
+// TestSend_ConcurrentCrossTransfers_NoLoss, проверяет корректность при параллельных перекрестных переводах и отсутствие потерь
 func TestSend_ConcurrentCrossTransfers_NoLoss(t *testing.T) {
 	db := openDB(t)
 	defer db.Close()
 
+	// два кошелька с одинаковым балансом
 	a := createWallet(t, db, 10000)
 	b := createWallet(t, db, 10000)
 	defer cleanupWallets(t, db, a, b)
@@ -197,15 +221,16 @@ func TestSend_ConcurrentCrossTransfers_NoLoss(t *testing.T) {
 
 	r := buildRouter(db)
 
-	const pairs = 6
+	const pairs = 6   // число пар запросов туда и обратно
 	const amount = 1.00
-	const cents = int64(100)
+	const cents = int64(100) // для справки, не используется в проверках
 
 	var wg sync.WaitGroup
 	wg.Add(pairs * 2)
 
 	start := make(chan struct{})
 
+	// функция единственного перевода, ждет общего старта
 	do := func(from, to string) {
 		defer wg.Done()
 		<-start
@@ -216,18 +241,22 @@ func TestSend_ConcurrentCrossTransfers_NoLoss(t *testing.T) {
 		rr := httptest.NewRecorder()
 		r.ServeHTTP(rr, req)
 
+		// каждый запрос должен завершиться 200
 		if rr.Code != http.StatusOK {
 			t.Errorf("concurrent send returned %d, body=%s", rr.Code, rr.Body.String())
 		}
 	}
 
+	// запускаем попарно A->B и B->A
 	for i := 0; i < pairs; i++ {
 		go do(a, b) // A->B
 		go do(b, a) // B->A
 	}
 
+	// одновременный старт всех горутин
 	close(start)
 
+	// ждем завершения с таймаутом
 	done := make(chan struct{})
 	go func() {
 		wg.Wait()
@@ -239,6 +268,7 @@ func TestSend_ConcurrentCrossTransfers_NoLoss(t *testing.T) {
 		t.Fatal("timeout waiting for concurrent transfers")
 	}
 
+	// балансы должны вернуться к исходным, суммарный баланс должен сохраниться
 	afterA := getBalance(t, db, a)
 	afterB := getBalance(t, db, b)
 
@@ -255,38 +285,46 @@ func TestSend_ConcurrentCrossTransfers_NoLoss(t *testing.T) {
 	_ = cents
 }
 
+// TestSend_InvalidJSON, проверяет обработку поврежденного json
 func TestSend_InvalidJSON(t *testing.T) {
 	db := openDB(t)
 	defer db.Close()
 
 	r := buildRouter(db)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/send", bytes.NewBufferString(`{`)) 
+	// отправляем обрезанное тело
+	req := httptest.NewRequest(http.MethodPost, "/api/send", bytes.NewBufferString(`{`))
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
 
+	// ожидаем 400
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("want 400 for invalid json, got %d body=%s", rr.Code, rr.Body.String())
 	}
 }
 
+// TestSend_InvalidAddressFormat, проверяет валидацию формата адресов
 func TestSend_InvalidAddressFormat(t *testing.T) {
 	db := openDB(t)
 	defer db.Close()
 
 	r := buildRouter(db)
-	body := `{"from":"abc","to":"def","amount":1.00}` 
+
+	// некорректные адреса не hex и неверной длины
+	body := `{"from":"abc","to":"def","amount":1.00}`
 	req := httptest.NewRequest(http.MethodPost, "/api/send", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
 
+	// ожидаем 400
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("want 400 for invalid address, got %d body=%s", rr.Code, rr.Body.String())
 	}
 }
 
+// TestSend_ZeroOrNegativeAmount, проверяет запрет нулевой и отрицательной суммы
 func TestSend_ZeroOrNegativeAmount(t *testing.T) {
 	db := openDB(t)
 	defer db.Close()
@@ -297,6 +335,7 @@ func TestSend_ZeroOrNegativeAmount(t *testing.T) {
 
 	r := buildRouter(db)
 
+	// прогоняем два случая, ноль и минус
 	for _, amt := range []string{"0", "-1.23"} {
 		body := fmt.Sprintf(`{"from":"%s","to":"%s","amount":%s}`, a, b, amt)
 		req := httptest.NewRequest(http.MethodPost, "/api/send", strings.NewReader(body))
@@ -304,12 +343,14 @@ func TestSend_ZeroOrNegativeAmount(t *testing.T) {
 		rr := httptest.NewRecorder()
 		r.ServeHTTP(rr, req)
 
+		// ожидаем 400
 		if rr.Code != http.StatusBadRequest {
 			t.Fatalf("want 400 for amount=%s, got %d body=%s", amt, rr.Code, rr.Body.String())
 		}
 	}
 }
 
+// TestGetLastTransactions_Basic, проверяет базовый вывод последних транзакций и фильтр по count
 func TestGetLastTransactions_Basic(t *testing.T) {
 	db := openDB(t)
 	defer db.Close()
@@ -320,6 +361,7 @@ func TestGetLastTransactions_Basic(t *testing.T) {
 
 	r := buildRouter(db)
 
+	// создаем три перевода, суммы возрастают
 	for _, amt := range []string{"1.00", "2.00", "3.00"} {
 		body := fmt.Sprintf(`{"from":"%s","to":"%s","amount":%s}`, a, b, amt)
 		req := httptest.NewRequest(http.MethodPost, "/api/send", strings.NewReader(body))
@@ -331,10 +373,12 @@ func TestGetLastTransactions_Basic(t *testing.T) {
 		}
 	}
 
+	// запрашиваем две последние транзакции
 	req := httptest.NewRequest(http.MethodGet, "/api/transactions?count=2", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
 
+	// ожидаем 200 и наличие последней суммы 3.00
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d, body=%s", rr.Code, rr.Body.String())
 	}
@@ -345,6 +389,7 @@ func TestGetLastTransactions_Basic(t *testing.T) {
 	}
 }
 
+// TestGetLastTransactions_InvalidCount, проверяет валидацию параметра count при нечисловом значении
 func TestGetLastTransactions_InvalidCount(t *testing.T) {
 	db := openDB(t)
 	defer db.Close()
@@ -355,11 +400,13 @@ func TestGetLastTransactions_InvalidCount(t *testing.T) {
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
 
+	// ожидаем 400
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d, body=%s", rr.Code, rr.Body.String())
 	}
 }
 
+// TestGetLastTransactions_DefaultAndLimit, проверяет значение count по умолчанию и верхний лимит
 func TestGetLastTransactions_DefaultAndLimit(t *testing.T) {
 	db := openDB(t)
 	defer db.Close()
@@ -370,6 +417,7 @@ func TestGetLastTransactions_DefaultAndLimit(t *testing.T) {
 
 	r := buildRouter(db)
 
+	// генерируем много мелких переводов, чтобы проверить усечение по лимиту
 	for i := 0; i < 120; i++ {
 		body := fmt.Sprintf(`{"from":"%s","to":"%s","amount":0.01}`, a, b)
 		req := httptest.NewRequest(http.MethodPost, "/api/send", strings.NewReader(body))
@@ -381,6 +429,7 @@ func TestGetLastTransactions_DefaultAndLimit(t *testing.T) {
 		}
 	}
 
+	// запрос без параметров, ожидаем дефолтное количество
 	req := httptest.NewRequest(http.MethodGet, "/api/transactions", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -391,6 +440,7 @@ func TestGetLastTransactions_DefaultAndLimit(t *testing.T) {
 		t.Fatalf("unexpected body: %s", rr.Body.String())
 	}
 
+	// запрос с очень большим count, ожидаем что сервис применит верхний предел
 	req = httptest.NewRequest(http.MethodGet, "/api/transactions?count=5000", nil)
 	rr = httptest.NewRecorder()
 	r.ServeHTTP(rr, req)

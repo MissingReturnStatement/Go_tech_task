@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
+// Transaction, доменная модель транзакции, содержит идентификатор, адреса сторон, сумму в центах, время создания
 type Transaction struct {
 	ID          int64
 	FromAddress string
@@ -18,18 +19,21 @@ type Transaction struct {
 	CreatedAt   time.Time
 }
 
+// доменные ошибки, кошелек не найден, недостаточно средств, одинаковые адреса
 var (
 	ErrWalletNotFound    = errors.New("wallet not found")
 	ErrInsufficientFunds = errors.New("insufficient funds")
 	ErrSameAddress       = errors.New("from == to")
 )
 
+// Repo, контракт доступа к данным, получить баланс, выполнить перевод, получить последние транзакции
 type Repo interface {
 	GetBalance(ctx context.Context, address string) (int64, error)
 	Transfer(ctx context.Context, from, to string, amountCents int64) error
 	GetLastTransactions(ctx context.Context, n int) ([]Transaction, error) 
 }
 
+// GetLastTransactions, читает последние операции из таблицы транзакций, ограничивает количество, сортирует по времени по убыванию
 func (r *PostgresRepo) GetLastTransactions(ctx context.Context, n int) ([]Transaction, error) {
 	if n <= 0 {
 		n = 10
@@ -60,11 +64,13 @@ func (r *PostgresRepo) GetLastTransactions(ctx context.Context, n int) ([]Transa
 	return out, rows.Err()
 }
 
-
+// PostgresRepo, реализация репозитория поверх sql базы
 type PostgresRepo struct{ DB *sql.DB }
 
+// NewPostgres, конструктор репозитория
 func NewPostgres(db *sql.DB) *PostgresRepo { return &PostgresRepo{DB: db} }
 
+// GetBalance, возвращает баланс кошелька в центах, маппит отсутствие строки на доменную ошибку кошелек не найден
 func (r *PostgresRepo) GetBalance(ctx context.Context, address string) (int64, error) {
 	const q = `SELECT balance_cents FROM wallets WHERE address=$1`
 	var cents int64
@@ -77,12 +83,13 @@ func (r *PostgresRepo) GetBalance(ctx context.Context, address string) (int64, e
 	return cents, nil
 }
 
-
+// isDeadlock, определяет конфликт блокировок по коду ошибки postgres, код 40P01
 func isDeadlock(err error) bool {
 	var pgerr *pgconn.PgError
 	return errors.As(err, &pgerr) && pgerr.Code == "40P01"
 }
 
+// transferOnce, выполняет один перевод в транзакции, валидирует входные данные, блокирует оба кошелька в стабильном порядке по адресу, проверяет баланс, обновляет балансы, пишет запись в журнал транзакций, коммитит
 func (r *PostgresRepo) transferOnce(ctx context.Context, from, to string, amountCents int64) error {
 	if from == to {
 		return ErrSameAddress
@@ -97,6 +104,7 @@ func (r *PostgresRepo) transferOnce(ctx context.Context, from, to string, amount
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// определяем порядок блокировки строк, всегда сначала меньший адрес, затем больший, это снижает риск дедлока
 	a1, a2 := from, to
 	swap := false
 	if a2 < a1 {
@@ -108,6 +116,7 @@ func (r *PostgresRepo) transferOnce(ctx context.Context, from, to string, amount
 		addr string
 		bal  int64
 	}
+	// выбираем обе строки с блокировкой, порядок по адресу, тем самым соблюдаем одинаковый порядок блокировок
 	rows, err := tx.QueryContext(ctx, `
 		SELECT address, balance_cents
 		FROM wallets
@@ -135,32 +144,37 @@ func (r *PostgresRepo) transferOnce(ctx context.Context, from, to string, amount
 		return ErrWalletNotFound
 	}
 
+	// раскладываем балансы по ролям с учетом возможной перестановки адресов
 	var fromBal, toBal int64
 	if !swap {
-		if got[0].addr != from || got[1].addr != to {
-		}
+		// ожидаем что первый это from, второй это to, балансы берем по позиции
 		fromBal = got[0].bal
 		toBal = got[1].bal
 	} else {
+		// адреса поменяны местами, значит баланс отправителя во втором элементе
 		fromBal = got[1].bal
 		toBal = got[0].bal
 	}
 
+	// проверка достаточности средств
 	if fromBal < amountCents {
-		return ErrInsufficientFunds
+	return ErrInsufficientFunds
 	}
 
+	// обновляем баланс отправителя
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE wallets SET balance_cents = $1 WHERE address = $2`,
 		fromBal-amountCents, from); err != nil {
 		return err
 	}
+	// обновляем баланс получателя
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE wallets SET balance_cents = $1 WHERE address = $2`,
 		toBal+amountCents, to); err != nil {
 		return err
 	}
 
+	// добавляем запись о переводе
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO transactions(from_address, to_address, amount_cents)
 		VALUES ($1, $2, $3)
@@ -168,8 +182,11 @@ func (r *PostgresRepo) transferOnce(ctx context.Context, from, to string, amount
 		return err
 	}
 
+	// фиксируем изменения
 	return tx.Commit()
 }
+
+// Transfer, выполняет перевод, при дедлоках повторяет попытку с задержкой, останавливается при успехе или любой другой ошибке
 
 func (r *PostgresRepo) Transfer(ctx context.Context, from, to string, amountCents int64) error {
     const maxAttempts = 10 
@@ -180,6 +197,7 @@ func (r *PostgresRepo) Transfer(ctx context.Context, from, to string, amountCent
             return nil
         }
         if isDeadlock(err) {
+            // вычисляем задержку, шаг растет с номером попытки, добавляем случайный джиттер, ждем или выходим по контексту
             backoff := time.Duration(15*(attempt+1)) * time.Millisecond
             jitter  := time.Duration(rand.Intn(15)) * time.Millisecond 
             sleep := backoff + jitter
@@ -191,8 +209,9 @@ func (r *PostgresRepo) Transfer(ctx context.Context, from, to string, amountCent
                 return ctx.Err()
             }
         }
+        // если ошибка не дедлок, возвращаем ее сразу
         return err
     }
+    // все попытки исчерпаны, сообщаем об ошибке
     return errors.New("could not complete transfer after retries")
 }
-
