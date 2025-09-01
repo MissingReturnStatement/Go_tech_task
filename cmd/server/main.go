@@ -11,7 +11,9 @@ import (
 	"github.com/go-chi/chi/v5"
 	_ "github.com/jackc/pgx/v5/stdlib"
 
-	intdb "gotechtask/internal/db"
+	intapi  "gotechtask/internal/api"
+	intdb   "gotechtask/internal/db"
+	intrepo "gotechtask/internal/repo"
 )
 
 func main() {
@@ -36,12 +38,16 @@ func main() {
 		log.Fatalf("seed wallets: %v", err)
 	} else if len(addrs) > 0 {
 		log.Printf("seeded %d wallets (100.00 each), first=%s", len(addrs), addrs[0])
-	} else {
-		log.Printf("seed skipped (wallets already exist)")
 	}
 
+	repo := intrepo.NewPostgres(db)
+	api := &intapi.API{Repo: repo}
+
 	r := chi.NewRouter()
-	r.Get("/health", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("ok")) })
+	api.Routes(r) 
+	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	})
 
 	log.Println("server started on :8080")
 	log.Fatal(http.ListenAndServe(":8080", r))
