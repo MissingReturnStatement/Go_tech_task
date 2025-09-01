@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"time"
+	"strconv"
 
 	"github.com/go-chi/chi/v5"
 	"gotechtask/internal/repo"
@@ -18,6 +19,7 @@ type API struct {
 func (a *API) Routes(r chi.Router) {
 	r.Get("/api/wallet/{address}/balance", a.getBalance)
 	r.Post("/api/send", a.postSend)
+	r.Get("/api/transactions", a.getLastTransactions)
 }
 
 func (a *API) getBalance(w http.ResponseWriter, r *http.Request) {
@@ -104,4 +106,52 @@ func formatCents(c int64) string {
 		c = -c
 	}
 	return sign + fmt.Sprintf("%d.%02d", c/100, c%100)
+}
+
+type txDTO struct {
+	ID        int64  `json:"id"`
+	From      string `json:"from"`
+	To        string `json:"to"`
+	Amount    string `json:"amount"`
+	CreatedAt string `json:"created_at"`
+}
+
+func (a *API) getLastTransactions(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query().Get("count")
+	n := 10
+	if q != "" {
+		v, err := strconv.Atoi(q)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid count"})
+			return
+		}
+		n = v
+	}
+	if n <= 0 {
+		n = 10
+	}
+	if n > 100 {
+		n = 100
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	items, err := a.Repo.GetLastTransactions(ctx, n)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		return
+	}
+
+	out := make([]txDTO, 0, len(items))
+	for _, t := range items {
+		out = append(out, txDTO{
+			ID:        t.ID,
+			From:      t.FromAddress,
+			To:        t.ToAddress,
+			Amount:    formatCents(t.AmountCents),
+			CreatedAt: t.CreatedAt.UTC().Format(time.RFC3339),
+		})
+	}
+	writeJSON(w, http.StatusOK, out)
 }

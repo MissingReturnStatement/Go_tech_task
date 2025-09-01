@@ -255,14 +255,13 @@ func TestSend_ConcurrentCrossTransfers_NoLoss(t *testing.T) {
 	_ = cents
 }
 
-// Невалидный JSON
 func TestSend_InvalidJSON(t *testing.T) {
 	db := openDB(t)
 	defer db.Close()
 
 	r := buildRouter(db)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/send", bytes.NewBufferString(`{`)) // обрезанный JSON
+	req := httptest.NewRequest(http.MethodPost, "/api/send", bytes.NewBufferString(`{`)) 
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -277,8 +276,7 @@ func TestSend_InvalidAddressFormat(t *testing.T) {
 	defer db.Close()
 
 	r := buildRouter(db)
-	body := `{"from":"abc","to":"def","amount":1.00}` // короткие адреса
-
+	body := `{"from":"abc","to":"def","amount":1.00}` 
 	req := httptest.NewRequest(http.MethodPost, "/api/send", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
@@ -309,5 +307,94 @@ func TestSend_ZeroOrNegativeAmount(t *testing.T) {
 		if rr.Code != http.StatusBadRequest {
 			t.Fatalf("want 400 for amount=%s, got %d body=%s", amt, rr.Code, rr.Body.String())
 		}
+	}
+}
+
+func TestGetLastTransactions_Basic(t *testing.T) {
+	db := openDB(t)
+	defer db.Close()
+
+	a := createWallet(t, db, 10000)
+	b := createWallet(t, db, 10000)
+	defer cleanupWallets(t, db, a, b)
+
+	r := buildRouter(db)
+
+	for _, amt := range []string{"1.00", "2.00", "3.00"} {
+		body := fmt.Sprintf(`{"from":"%s","to":"%s","amount":%s}`, a, b, amt)
+		req := httptest.NewRequest(http.MethodPost, "/api/send", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		r.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("send failed: %d %s", rr.Code, rr.Body.String())
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/transactions?count=2", nil)
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d, body=%s", rr.Code, rr.Body.String())
+	}
+
+	body := rr.Body.String()
+	if !strings.HasPrefix(body, "[") || !strings.Contains(body, `"amount":"3.00"`) {
+		t.Fatalf("unexpected body: %s", body)
+	}
+}
+
+func TestGetLastTransactions_InvalidCount(t *testing.T) {
+	db := openDB(t)
+	defer db.Close()
+
+	r := buildRouter(db)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/transactions?count=abc", nil)
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d, body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestGetLastTransactions_DefaultAndLimit(t *testing.T) {
+	db := openDB(t)
+	defer db.Close()
+
+	a := createWallet(t, db, 1000000)
+	b := createWallet(t, db, 1000000)
+	defer cleanupWallets(t, db, a, b)
+
+	r := buildRouter(db)
+
+	for i := 0; i < 120; i++ {
+		body := fmt.Sprintf(`{"from":"%s","to":"%s","amount":0.01}`, a, b)
+		req := httptest.NewRequest(http.MethodPost, "/api/send", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		r.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("send failed: %d %s", rr.Code, rr.Body.String())
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/transactions", nil)
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d, body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.HasPrefix(rr.Body.String(), "[") {
+		t.Fatalf("unexpected body: %s", rr.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/transactions?count=5000", nil)
+	rr = httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d, body=%s", rr.Code, rr.Body.String())
 	}
 }

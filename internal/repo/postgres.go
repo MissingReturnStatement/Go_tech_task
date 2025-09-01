@@ -10,6 +10,14 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
+type Transaction struct {
+	ID          int64
+	FromAddress string
+	ToAddress   string
+	AmountCents int64
+	CreatedAt   time.Time
+}
+
 var (
 	ErrWalletNotFound    = errors.New("wallet not found")
 	ErrInsufficientFunds = errors.New("insufficient funds")
@@ -19,7 +27,39 @@ var (
 type Repo interface {
 	GetBalance(ctx context.Context, address string) (int64, error)
 	Transfer(ctx context.Context, from, to string, amountCents int64) error
+	GetLastTransactions(ctx context.Context, n int) ([]Transaction, error) 
 }
+
+func (r *PostgresRepo) GetLastTransactions(ctx context.Context, n int) ([]Transaction, error) {
+	if n <= 0 {
+		n = 10
+	}
+	if n > 100 {
+		n = 100
+	}
+
+	rows, err := r.DB.QueryContext(ctx, `
+		SELECT id, from_address, to_address, amount_cents, created_at
+		FROM transactions
+		ORDER BY created_at DESC
+		LIMIT $1
+	`, n)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []Transaction
+	for rows.Next() {
+		var t Transaction
+		if err := rows.Scan(&t.ID, &t.FromAddress, &t.ToAddress, &t.AmountCents, &t.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
 
 type PostgresRepo struct{ DB *sql.DB }
 
